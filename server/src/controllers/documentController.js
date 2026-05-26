@@ -1,6 +1,7 @@
 import axios from "axios";
 import fs from "fs";
 import fsp from "fs/promises";
+import FormData from "form-data";
 import mime from "mime-types";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -21,11 +22,20 @@ const getFastApiMessage = (error) => {
   return error.response?.data?.detail || error.response?.data?.message || error.message || "AI service request failed";
 };
 
-const processDocumentInBackground = async (documentId, filePath) => {
+const processDocumentInBackground = async (documentId, filePath, originalName) => {
   try {
-    await fastApiClient.post("/process", {
-      file_path: filePath,
-      document_id: documentId.toString(),
+    // Send the file as multipart form data so FastAPI doesn't need filesystem access.
+    const form = new FormData();
+    form.append("file", fs.createReadStream(filePath), {
+      filename: originalName,
+      contentType: mime.lookup(filePath) || "application/octet-stream",
+    });
+    form.append("document_id", documentId.toString());
+
+    await fastApiClient.post("/process", form, {
+      headers: form.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
     });
 
     // Generate summary and suggested questions now that embeddings are ready.
@@ -45,7 +55,6 @@ const processDocumentInBackground = async (documentId, filePath) => {
         `Summary generation failed for document ${documentId}:`,
         summaryError.message
       );
-      // Still mark as ready even if summary fails.
       await Document.findByIdAndUpdate(documentId, { status: "ready" });
     }
   } catch (error) {
@@ -67,7 +76,7 @@ const uploadDocument = asyncHandler(async (req, res) => {
     status: "processing",
   });
 
-  processDocumentInBackground(document._id, req.file.path);
+  processDocumentInBackground(document._id, req.file.path, req.file.originalname);
 
   res.status(202).json({
     documentId: document._id,

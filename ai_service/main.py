@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import List
@@ -12,7 +13,7 @@ from typing import List
 import fitz
 import google.generativeai as genai
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -70,11 +71,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class ProcessRequest(BaseModel):
-    file_path: str = Field(..., min_length=1)
-    document_id: str = Field(..., min_length=1)
 
 
 class QueryRequest(BaseModel):
@@ -380,37 +376,55 @@ def health_check():
 
 
 @app.post("/process")
-def process_document(payload: ProcessRequest):
-    segments = extract_document_segments(payload.file_path)
+async def process_document(
+    file: UploadFile = File(...),
+    document_id: str = Form(...),
+):
+    """Accept the document as a multipart upload, write to a temp file, process, then clean up."""
+    suffix = Path(file.filename or "upload").suffix.lower() or ".bin"
 
-    if not segments:
-        raise HTTPException(status_code=400, detail="No extractable text found in file")
-
-    chunks = split_segments(segments)
-
-    if not chunks:
-        raise HTTPException(status_code=400, detail="No chunks could be created from this file")
-
-    embeddings = embed_texts([chunk["text"] for chunk in chunks])
-
-    records = [
-        {
-            "document_id": payload.document_id,
-            "chunk_index": index,
-            "page": chunk.get("page"),
-            "text": chunk["text"],
-            "embedding": embedding,
-        }
-        for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-    ]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp_path = tmp.name
+        content = await file.read()
+        tmp.write(content)
 
     try:
-        embeddings_collection.delete_many({"document_id": payload.document_id})
-        embeddings_collection.insert_many(records)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to store embeddings: {exc}") from exc
+        segments = extract_document_segments(tmp_path)
 
-    return {"status": "success", "chunks_processed": len(records)}
+        if not segments:
+            raise HTTPException(status_code=400, detail="No extractable text found in file")
+
+        chunks = split_segments(segments)
+
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No chunks could be created from this file")
+
+        embeddings = embed_texts([chunk["text"] for chunk in chunks])
+
+        records = [
+            {
+                "document_id": document_id,
+                "chunk_index": index,
+                "page": chunk.get("page"),
+                "text": chunk["text"],
+                "embedding": embedding,
+            }
+            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
+        ]
+
+        try:
+            embeddings_collection.delete_many({"document_id": document_id})
+            embeddings_collection.insert_many(records)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to store embeddings: {exc}") from exc
+
+        return {"status": "success", "chunks_processed": len(records)}
+    finally:
+        # Always clean up the temp file.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 _SNIPPET_MAX_CHARS = 220

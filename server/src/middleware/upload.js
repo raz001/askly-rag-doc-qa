@@ -1,11 +1,15 @@
 import path from "path";
 import { fileURLToPath } from "url";
+import { mkdirSync } from "fs";
 import multer from "multer";
 import { isAllowedUploadFile, UPLOAD_TYPE_ERROR_MESSAGE } from "../constants/uploadFormats.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadDir = path.join(__dirname, "../../uploads");
+
+// Ensure the uploads directory exists (Render ephemeral filesystem needs this on cold start).
+mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
